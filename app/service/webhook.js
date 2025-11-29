@@ -225,22 +225,27 @@ class WebhookService extends Service {
 
   formatStatus(status) {
     let statusColor = 'comment', statusString, isNotify = true;
+    let statusIcon = '';
     switch (status) {
       case 'failed':
         statusColor = 'warning'
         statusString = '执行失败'
+        statusIcon = '❌';
         break
       case 'success':
         statusColor = 'info'
         statusString = '执行成功'
+        statusIcon = '✅';
         break
       case 'running':
         statusString = '运行中'
+        statusIcon = '⏳';
         break
       case 'pending':
         statusColor = 'warning'
         statusString = '准备中'
         isNotify = false
+        statusIcon = '🔄';
         break
       case 'canceled':
         statusString = '已取消'
@@ -255,7 +260,7 @@ class WebhookService extends Service {
         statusString = `状态未知 (${status})`
     }
 
-    return { statusColor, statusString }
+    return { statusColor, statusString, statusIcon }
   }
 
   formatCommits(commits) {
@@ -396,12 +401,12 @@ class WebhookService extends Service {
       return false; // Suppress message
     }
 
-    const { statusString } = this.formatStatus(status);
+    const { statusString, statusIcon } = this.formatStatus(status);
     const sourceString = this.formatFeishuPipelineSource(source);
 
     content.push([
       this.feishuLink(`#${pipelineId} 流水线`, pipelineUrl),
-      this.feishuText(` ${statusString}，位于 ${ref} 分支，由 ${sourceString} 触发。`),
+      this.feishuText(` ${statusIcon} ${statusString}，位于 ${ref} 分支，由 ${sourceString} 触发。`),
     ]);
     content.push([ this.feishuText(`操作人: ${name}`) ]);
     if (duration) {
