@@ -8,6 +8,8 @@ services:
     environment:
       - "CONTEXT_PATH=/"
       - "WEBHOOK_URL_PROJ=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=ABCDEFG"
+
+      - "FEISHU_WEBHOOK_URL_PROJ=https://open.feishu.cn/open-apis/bot/v2/hook/ABCDEFG"
     deploy:
       replicas: 1
       resources:

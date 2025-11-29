@@ -290,6 +290,218 @@ class WebhookService extends Service {
     }
   }
 
+  // =================================================================================================
+  // Feishu Notification Methods
+  // =================================================================================================
+
+  async translateFeishuMsg(data) {
+    const { object_kind } = data || {};
+    if (!OBJECT_KIND[object_kind]) {
+      return null;
+    }
+
+    let res = true;
+    const title = this.generateFeishuTitle(object_kind, data);
+    const content = [];
+
+    switch (object_kind) {
+      case OBJECT_KIND.push:
+        res = await this.assembleFeishuPushMsg(content, data);
+        break;
+      case OBJECT_KIND.pipeline:
+        res = await this.assembleFeishuPipelineMsg(content, data);
+        break;
+      case OBJECT_KIND.merge_request:
+        res = await this.assembleFeishuMergeMsg(content, data);
+        break;
+      case OBJECT_KIND.tag_push:
+        res = await this.assembleFeishuTagPushMsg(content, data);
+        break;
+      default:
+        return null; // Not supported for Feishu yet
+    }
+
+    if (!res || content.length === 0) {
+      return null;
+    }
+
+    return {
+      msg_type: 'post',
+      content: {
+        post: {
+          zh_cn: {
+            title,
+            content,
+          },
+        },
+      },
+    };
+  }
+
+  generateFeishuTitle(object_kind, { project }) {
+    const { path_with_namespace } = project || {};
+    switch (object_kind) {
+      case OBJECT_KIND.push: return `${path_with_namespace}: 代码推送`;
+      case OBJECT_KIND.pipeline: return `${path_with_namespace}: 流水线状态更新`;
+      case OBJECT_KIND.merge_request: return `${path_with_namespace}: 合并请求`;
+      case OBJECT_KIND.tag_push: return `${path_with_namespace}: 新增/删除标签`;
+      default: return 'GitLab 通知';
+    }
+  }
+
+  // Feishu Content Assemblers
+
+  async assembleFeishuPushMsg(content, { user_name, ref, project, commits, total_commits_count, before, after }) {
+    const { web_url, path_with_namespace } = project || {};
+    const branch = ref.replace('refs/heads/', '');
+    let op = '';
+    if (before === '0000000000000000000000000000000000000000') {
+      op = '新建分支';
+    } else if (after === '0000000000000000000000000000000000000000') {
+      op = '删除分支';
+    } else {
+      op = '将代码推至';
+    }
+
+    content.push([
+      this.feishuText(`${user_name} ${op} `),
+      this.feishuLink(`${path_with_namespace}/${branch}`, `${web_url}/tree/${branch}`),
+    ]);
+
+    if (total_commits_count > 0) {
+      content.push([ this.feishuText(`共提交 ${total_commits_count} 次:`) ]);
+      const { added, modified, removed } = this.countCommitChanges(commits);
+      const commitLines = commits.map(c => [
+        this.feishuText(`${c.author.name}: `),
+        this.feishuLink(S(c.message).collapseWhitespace().s, c.url),
+      ]);
+      content.push(...commitLines);
+      content.push([
+        this.feishuText(`新增: ${added} 修改: ${modified} 删除: ${removed}`),
+      ]);
+    }
+
+    return true;
+  }
+
+  async assembleFeishuPipelineMsg(content, { object_attributes, user, project, commit, builds }) {
+    const { id: pipelineId, ref, status, duration, source } = object_attributes || {};
+    const { web_url } = project || {};
+    const { name } = user || {};
+    const pipelineUrl = `${web_url}/pipelines/${pipelineId}`;
+
+    const hasUnfinishedBuilds = _.some(builds, b => [ 'created', 'running', 'pending' ].includes(b.status));
+    if (hasUnfinishedBuilds) {
+      this.logger.info('===> Feishu msg suppressed due to unfinished builds.');
+      return false; // Suppress message
+    }
+
+    const { statusString } = this.formatStatus(status);
+    const sourceString = this.formatFeishuPipelineSource(source);
+
+    content.push([
+      this.feishuLink(`#${pipelineId} 流水线`, pipelineUrl),
+      this.feishuText(` ${statusString}，位于 ${ref} 分支，由 ${sourceString} 触发。`),
+    ]);
+    content.push([ this.feishuText(`操作人: ${name}`) ]);
+    if (duration) {
+      content.push([ this.feishuText(`总耗时: ${this.formatDuration(duration)}`) ]);
+    }
+    if (commit) {
+      content.push([
+        this.feishuText('提交详情: '),
+        this.feishuLink(S(commit.message).collapseWhitespace().s, commit.url),
+        this.feishuText(` by ${commit.author.name}`),
+      ]);
+    }
+
+    return true;
+  }
+
+  async assembleFeishuMergeMsg(content, { user, project, object_attributes }) {
+    const { name } = user || {};
+    const { iid: mrId, url: mrUrl, target_branch, source_branch, state, title, last_commit: commit } = object_attributes || {};
+    const { path_with_namespace } = project || {};
+
+    const stateString = this.formatFeishuMRState(state);
+
+    content.push([
+      this.feishuText(`${name} ${stateString} 合并请求 `),
+      this.feishuLink(`#${mrId} ${title}`, mrUrl),
+    ]);
+    content.push([
+      this.feishuText(`项目: ${path_with_namespace}`),
+    ]);
+    content.push([
+      this.feishuText(`分支: ${source_branch} -> ${target_branch}`),
+    ]);
+
+    if (commit) {
+      content.push([
+        this.feishuText('最新提交: '),
+        this.feishuLink(S(commit.message).collapseWhitespace().s, commit.url),
+      ]);
+    }
+    return true;
+  }
+
+  async assembleFeishuTagPushMsg(content, { ref, user_name, project, message, before, after }) {
+    const { web_url, path_with_namespace } = project || {};
+    const tag = ref.replace('refs/tags/', '');
+    let op = '';
+    if (before === '0000000000000000000000000000000000000000') {
+      op = '新增';
+    } else if (after === '0000000000000000000000000000000000000000') {
+      op = '删除';
+    }
+
+    content.push([
+      this.feishuText(`${user_name} ${op} 标签 `),
+      this.feishuLink(`${path_with_namespace}/${tag}`, `${web_url}/-/tags/${tag}`),
+    ]);
+    if (message) {
+      content.push([ this.feishuText(`说明: ${message}`) ]);
+    }
+    return true;
+  }
+
+  // Feishu Helpers
+  feishuText(text) {
+    return { tag: 'text', text };
+  }
+
+  feishuLink(text, href) {
+    return { tag: 'a', text, href };
+  }
+
+  countCommitChanges(commits = []) {
+    return commits.reduce((acc, commit) => {
+      acc.added += (commit.added || []).length;
+      acc.modified += (commit.modified || []).length;
+      acc.removed += (commit.removed || []).length;
+      return acc;
+    }, { added: 0, modified: 0, removed: 0 });
+  }
+
+  formatFeishuPipelineSource(source) {
+    switch (source) {
+      case 'push': return '推送操作';
+      case 'merge_request_event': return '合并操作';
+      case 'web': return '网页运行';
+      default: return `操作(${source})`;
+    }
+  }
+
+  formatFeishuMRState(state) {
+    switch (state) {
+      case 'opened': return '开启了';
+      case 'closed': return '取消了';
+      case 'locked': return '锁定了';
+      case 'merged': return '确认了';
+      default: return state;
+    }
+  }
+
 }
 
 module.exports = WebhookService;
